@@ -336,6 +336,8 @@ def main(cfg: DictConfig) -> None:
     # Apply the initialization strategy
     if cfg.problem.type != 'inpainting_squared_mask':
         mask = None
+    else:
+        mask = forward_model.mask
     if cfg.init_strategy == 'y_noise':
         x_init, y_norm = _get_x_init(y_norm, forward_model, transpose_operator, mask, cfg)
         save_image(x_init*0.5 + 0.5, os.path.join(xp_log_dir, 'x_init.png'))
@@ -832,3 +834,4 @@ def main(cfg: DictConfig) -> None:
 
 if __name__ == "__main__":
     main()
+
