@@ -2,6 +2,8 @@
 
 > **LAtent consisTency INverse sOlver with PRompt Optimization** – <https://arxiv.org/abs/2503.12615>.
 
+![Visitors](https://visitor-badge.laobi.icu/badge?page_id=<USERNAME>.<REPO>)
+[![GitHub stars](https://img.shields.io/github/stars/LATINO-PRO/LATINO-PRO.svg?style=social&label=Stars)](https://github.com/<USERNAME>/<REPO>/stargazers)
 ---
 
 ## 📦 Installation
