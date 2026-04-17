@@ -1,0 +1,11 @@
+problem:
+  type: inpainting_squared_mask
+  mask_size: 512
+  sigma_y: 0.01
+image:
+  path: ./samples/flickr_cat_000191.jpg
+  prompt: a photo of a cat
+log_subfolder: /latino_pro
+seed: 42
+num_SAPG_steps: 15
+init_strategy: y_noise

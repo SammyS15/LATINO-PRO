@@ -1,0 +1,11 @@
+problem:
+  type: inpainting_squared_mask
+  mask_size: 512
+  sigma_y: 0.01
+image:
+  path: ./samples/60007.png
+  prompt: a photo of a face
+log_subfolder: slurm_9983157/latino_pro
+seed: 42
+num_SAPG_steps: 15
+init_strategy: y_noise

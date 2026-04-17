@@ -11,12 +11,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import csv
 from diffusers import (
-    AutoencoderKL,
-    UNet2DConditionModel,
-    DiffusionPipeline,
+    AutoPipelineForText2Image,
     LCMScheduler,
 )
-from huggingface_hub import hf_hub_download
 from omegaconf import DictConfig, OmegaConf
 import hydra
 
@@ -53,23 +50,22 @@ def main(cfg: DictConfig) -> None:
     ssim_loss = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=1).to(device)
 
     # load stable diffusion
-    base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
-    repo_name = "tianweiy/DMD2"
-    ckpt_name = "dmd2_sdxl_4step_unet_fp16.bin"
+    model_id = "/home/sammys15/links/scratch/Latent_Posterior_Sampling_Method_Comparsion/stable_diffusion_1_5_model"
+    adapter_id = "/home/sammys15/links/scratch/Latent_Posterior_Sampling_Method_Comparsion/lcm-lora-sdv1-5"
 
-    # Load model.
-    unet_config = UNet2DConditionModel.load_config(base_model_id, subfolder="unet")
-    unet = UNet2DConditionModel.from_config(unet_config).to(device, torch.float16)
-    unet.load_state_dict(torch.load(hf_hub_download(repo_name, ckpt_name), map_location=device, weights_only=True))
-    vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
-    pipe = DiffusionPipeline.from_pretrained(base_model_id, unet=unet, vae=vae, torch_dtype=torch.float16, variant="fp16", guidance_scale=0).to(device)
+    pipe = AutoPipelineForText2Image.from_pretrained(model_id, torch_dtype=torch.float16, variant="fp16",
+                                                     requires_safety_checker=False, safety_checker=None)
     pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
-    prompt = cfg.image.prompt    #Ensure that the prompt starts with "a photo of"!
+    pipe.load_lora_weights(adapter_id)
+    pipe.fuse_lora()
+    pipe = pipe.to(device)
+
+    prompt = cfg.image.prompt
 
     # Encode text to conditioning
-    text_embeddings, _, pooled_text_embeds, _ = pipe.encode_prompt(
+    text_embeddings, _ = pipe.encode_prompt(
         prompt,
-        device=device, 
+        device=device,
         num_images_per_prompt=1,
         do_classifier_free_guidance=False
     )
@@ -77,9 +73,9 @@ def main(cfg: DictConfig) -> None:
     # Create a random generator
     generator = torch.Generator(device=device).manual_seed(seed)
 
-    # Assuming desired resolution of 1024x1024
-    image_height = 1024
-    image_width = 1024
+    # Assuming desired resolution of 512x512
+    image_height = 512
+    image_width = 512
 
     # Prepare initial noise latents with correct device type
     latents = pipe.prepare_latents(
@@ -91,21 +87,6 @@ def main(cfg: DictConfig) -> None:
         device=device,  # Corrected device type
         generator=generator  # Random number generator
     )
-
-    # Get time_ids automatically based on the image resolution
-    time_ids = pipe._get_add_time_ids(
-        original_size=(image_height, image_width),  # The original image resolution
-        crops_coords_top_left=(0, 0),  # No cropping
-        target_size=(image_height, image_width),  # Target resolution
-        dtype=torch.float16,  # Ensure correct data type
-        text_encoder_projection_dim=1280
-    ).to(device)
-    
-    # Additional conditioning required for SDXL
-    added_cond_kwargs = {
-        "text_embeds": pooled_text_embeds,  # Pass the pooled text embeddings
-        "time_ids": time_ids
-    }
 
     # Define the number of inference steps and set timesteps
     num_inference_steps = 4     # set to 8 to use the full LATINO schedule
@@ -121,19 +102,19 @@ def main(cfg: DictConfig) -> None:
 
     x_clean = crop_to_multiple(xtemp, m=8).to(device)
     
-    # To adapt the method to 512x512 images
-    if xtemp.shape[-1] == 512:
-        noise_model_512_to_1024 = dinv.physics.GaussianNoise(sigma=0)
+    # Downscale 1024x1024 inputs to 512x512 for SD1.5
+    if xtemp.shape[-1] == 1024:
+        noise_model_1024_to_512 = dinv.physics.GaussianNoise(sigma=0)
 
-        model_512_to_1024 = dinv.physics.Downsampling(
+        model_1024_to_512 = dinv.physics.Downsampling(
                 img_size=(3, 1024, 1024),
                 factor=2,
                 device=device,
-                noise_model=noise_model_512_to_1024,
-                filter = "bicubic"
-                ).A_adjoint
-    
-        x_clean = model_512_to_1024(x_clean).clamp(0,1)
+                noise_model=noise_model_1024_to_512,
+                filter="bicubic"
+                )
+
+        x_clean = model_1024_to_512(x_clean).clamp(0, 1)
 
     x_clean = (x_clean - x_clean.min())/(x_clean.max() - x_clean.min())
 
@@ -159,6 +140,7 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.save(config=cfg, f=f)
 
     # Apply the initialization strategy
+    mu_z = None  # populated for y_noise init; kept for posterior sampling loop
     if cfg.problem.type != 'inpainting_squared_mask':
         mask = None
     else:
@@ -201,12 +183,11 @@ def main(cfg: DictConfig) -> None:
 
             with torch.enable_grad():
                 noise_uncond = pipe.unet(
-                    latents, 
-                    timestep, 
-                    encoder_hidden_states=text_embeddings, 
-                    added_cond_kwargs=added_cond_kwargs  # Include additional conditioning
+                    latents,
+                    timestep,
+                    encoder_hidden_states=text_embeddings,
                 ).sample
-            
+
             with torch.no_grad():
                 _, noise_pred = noise_pred_cond_y_PRO(
                     latents=latents,
@@ -298,10 +279,9 @@ def main(cfg: DictConfig) -> None:
                 # Sample from the prior with the actual prompt c
                 for _, timestep in enumerate(pipe.scheduler.timesteps):
                     noise_uncond = pipe.unet(
-                        latents, 
-                        timestep, 
-                        encoder_hidden_states=text_embeddings, 
-                        added_cond_kwargs=added_cond_kwargs  # Include additional conditioning
+                        latents,
+                        timestep,
+                        encoder_hidden_states=text_embeddings,
                     ).sample
                     latents = pipe.scheduler.step(noise_uncond, timestep, latents).prev_sample
 
@@ -334,10 +314,9 @@ def main(cfg: DictConfig) -> None:
                 # Sample from the prior with the actual prompt c
                 for k, timestep in enumerate(pipe.scheduler.timesteps):
                     noise_uncond = pipe.unet(
-                        latents, 
-                        timestep, 
-                        encoder_hidden_states=text_embeddings, 
-                        added_cond_kwargs=added_cond_kwargs  # Include additional conditioning
+                        latents,
+                        timestep,
+                        encoder_hidden_states=text_embeddings,
                     ).sample
                     latents = pipe.scheduler.step(noise_uncond, timestep, latents).prev_sample
 
@@ -361,12 +340,11 @@ def main(cfg: DictConfig) -> None:
             for i, timestep in enumerate(pipe.scheduler.timesteps):
                 with torch.no_grad():
                     noise_uncond = pipe.unet(
-                        latents, 
-                        timestep, 
-                        encoder_hidden_states=text_embeddings, 
-                        added_cond_kwargs=added_cond_kwargs  # Include additional conditioning
+                        latents,
+                        timestep,
+                        encoder_hidden_states=text_embeddings,
                     ).sample
-                
+
                 with torch.no_grad():
                     _, noise_pred = noise_pred_cond_y_PRO(
                         latents=latents,
@@ -434,24 +412,105 @@ def main(cfg: DictConfig) -> None:
         # Decode latents to image
         decoded_image = pipe.vae.decode(latents / pipe.vae.config.scaling_factor).sample
 
-    restored_x = (decoded_image / 2 + 0.5).clamp(0, 1)  # Normalize latents to image space
+    restored_x = (decoded_image / 2 + 0.5).clamp(0, 1)  # SAPG single-realization output
 
     save_image(restored_x, os.path.join(xp_log_dir, "restored.png"))
     save_image(((y_norm+1)/2).clamp(0, 1).detach().cpu(), os.path.join(xp_log_dir, "degraded.png"))
     save_image(x_clean.detach().cpu(), os.path.join(xp_log_dir, "clean.png"))
 
-    psnr = psnr_loss(restored_x, x_clean).item()
-    ssim = ssim_loss(restored_x, x_clean).item()
-    lpips = lpips_loss(restored_x * 2 - 1, x_clean * 2 -1).item()
+    # ------------------------------------------------------------------
+    # Posterior sampling: run num_samples independent LCM passes using
+    # the final optimised text_embeddings from SAPG.
+    # ------------------------------------------------------------------
+    num_samples = cfg.get('num_samples', 1)
+    all_samples = []
+    samples_dir = os.path.join(xp_log_dir, 'samples')
+    os.makedirs(samples_dir, exist_ok=True)
+
+    sample_start = time.time()
+    for sample_idx in range(num_samples):
+        print(f"\n--- Posterior sample {sample_idx + 1}/{num_samples} ---")
+        sample_seed = seed + sample_idx
+        generator_s = torch.Generator(device=device).manual_seed(sample_seed)
+
+        if cfg.init_strategy == 'y_noise' and mu_z is not None:
+            noise_s = torch.randn(mu_z.shape, generator=generator_s, device=device, dtype=mu_z.dtype)
+            latents_s = pipe.scheduler.add_noise(mu_z, noise=noise_s, timesteps=torch.tensor([999]))
+        else:
+            latents_s = pipe.prepare_latents(
+                batch_size=1,
+                num_channels_latents=pipe.unet.config.in_channels,
+                height=image_height,
+                width=image_width,
+                dtype=torch.float16,
+                device=device,
+                generator=generator_s,
+            )
+
+        pipe.scheduler.set_timesteps(8, device=device)
+        pipe.scheduler.timesteps = torch.tensor(
+            [999, 874, 749, 624, 499, 374, 249, 124], device=device, dtype=torch.long
+        )
+
+        for i, timestep in enumerate(pipe.scheduler.timesteps):
+            with torch.no_grad():
+                noise_uncond_s = pipe.unet(
+                    latents_s, timestep,
+                    encoder_hidden_states=text_embeddings,
+                ).sample
+                _, noise_pred_s = noise_pred_cond_y_PRO(
+                    latents=latents_s, t=timestep, pipe=pipe, cfg=cfg,
+                    logdir=xp_log_dir, y_guidance=y_norm, forward_model=forward_model,
+                    noise_pred=noise_uncond_s, sigma_y=sigma_y_norm,
+                    SAPG_j=cfg.num_SAPG_steps - 1, n_steps=8,
+                )
+                latents_s = pipe.scheduler.step(noise_pred_s, timestep, latents_s).prev_sample
+
+        with torch.no_grad():
+            decoded_s = pipe.vae.decode(latents_s / pipe.vae.config.scaling_factor).sample
+        sample_x = (decoded_s / 2 + 0.5).clamp(0, 1)
+        all_samples.append(sample_x.detach().cpu())
+        save_image(sample_x, os.path.join(samples_dir, f'sample_{sample_idx:03d}.png'))
+        print(f"Saved sample_{sample_idx:03d}.png")
+
+    print(f"\nSampling time: {time.time() - sample_start:.2f}s")
+
+    # Stack samples [N, C, H, W]
+    all_samples_t = torch.cat(all_samples, dim=0)
+
+    # Posterior mean and pixelwise std
+    posterior_mean = all_samples_t.mean(0, keepdim=True)
+    posterior_std  = all_samples_t.std(0, keepdim=True)
+    save_image(posterior_mean, os.path.join(xp_log_dir, 'posterior_mean.png'))
+    save_image(posterior_std.clamp(0, 1), os.path.join(xp_log_dir, 'posterior_std.png'))
+    save_image((posterior_std * 5).clamp(0, 1), os.path.join(xp_log_dir, 'posterior_std_5x.png'))
+
+    # Residuals
+    x_clean_cpu = x_clean.detach().cpu()
+    y_obs = y.clamp(0, 1).detach().cpu()
+    with torch.no_grad():
+        y_from_sample0 = forward_model.A(all_samples_t[0:1].to(device)).clamp(0, 1).detach().cpu()
+        y_from_mean    = forward_model.A(posterior_mean.to(device)).clamp(0, 1).detach().cpu()
+
+    save_image((x_clean_cpu - all_samples_t[0:1] + 1) / 2, os.path.join(xp_log_dir, 'residual_x_sample0.png'))
+    save_image((y_obs - y_from_sample0 + 1) / 2,           os.path.join(xp_log_dir, 'residual_y_sample0.png'))
+    save_image((x_clean_cpu - posterior_mean + 1) / 2,     os.path.join(xp_log_dir, 'residual_x_mean.png'))
+    save_image((y_obs - y_from_mean + 1) / 2,              os.path.join(xp_log_dir, 'residual_y_mean.png'))
+
+    # Final metrics computed on posterior mean
+    posterior_mean_dev = posterior_mean.to(device)
+    psnr  = psnr_loss(posterior_mean_dev, x_clean).item()
+    ssim  = ssim_loss(posterior_mean_dev, x_clean).item()
+    lpips = lpips_loss(posterior_mean_dev * 2 - 1, x_clean * 2 - 1).item()
     metrics = {
         'PSNR' : psnr,
-        'SSIM' : ssim, 
-        'LPIPS': lpips
+        'SSIM' : ssim,
+        'LPIPS': lpips,
     }
 
     if type(forward_model) == dinv.physics.Downsampling:
-        restored_x_lr = forward_model.A(restored_x.float())
-        lr_psnr = psnr_loss(((y_norm+1)/2).clamp(0, 1), restored_x_lr).item()
+        restored_x_lr = forward_model.A(posterior_mean_dev.float())
+        lr_psnr = psnr_loss(y_obs.to(device), restored_x_lr).item()
         metrics['OBS-PSNR'] = lr_psnr
 
     metric_string = ""

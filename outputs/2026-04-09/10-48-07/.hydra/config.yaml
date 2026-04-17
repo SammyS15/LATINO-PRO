@@ -1,0 +1,11 @@
+problem:
+  type: inpainting_squared_mask
+  mask_size: 512
+  sigma_y: 0.01
+image:
+  path: ./samples/flickr_cat_000191.jpg
+  prompt: a photo of a cat
+log_subfolder: slurm_10001137/latino
+seed: 42
+model: LATINO
+init_strategy: y_noise
