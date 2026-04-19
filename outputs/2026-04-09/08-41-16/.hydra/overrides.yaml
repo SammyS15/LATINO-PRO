@@ -1,0 +1,3 @@
+- problem=inpainting_squared_mask
+- image=cat
+- log_subfolder=/latino_pro
