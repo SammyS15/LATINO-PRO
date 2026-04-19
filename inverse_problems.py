@@ -50,11 +50,14 @@ def get_forward_model(cfg, x_clean, device):
             noise_model=noise_model,
         ).to(device)
         
+        
         # 🔥 HARD FIX: ensure internal buffers are moved
         forward_model.to(device)
         
         # 🔥 CRITICAL: re-assign mask AFTER .to()
         forward_model.mask = forward_model.mask.to(device)
+
+        transpose_operator = forward_model.A_adjoint
 
     elif cfg.problem.type == 'deblurring_gaussian':
         ksize = cfg.problem.sigma_kernel
