@@ -43,6 +43,18 @@ from noise_schemes import (
     noise_pred_cond_y_TReg,
 )
 
+
+def _resolve_sd15_model_path(model_path: str) -> str:
+    """Prefer a local diffusers directory over a legacy single-file checkpoint."""
+    if os.path.isdir(model_path):
+        return model_path
+    if os.path.isfile(model_path):
+        parent_dir = os.path.dirname(model_path)
+        if os.path.isfile(os.path.join(parent_dir, "model_index.json")):
+            print(f"Resolved SD 1.5 checkpoint to diffusers directory: {parent_dir}")
+            return parent_dir
+    return model_path
+
 @hydra.main(version_base=None, config_path="configs", config_name="LATINO")
 def main(cfg: DictConfig) -> None:
     # Set global random seeds for full reproducibility
@@ -189,8 +201,14 @@ def main(cfg: DictConfig) -> None:
     else:
         # Load Stable Diffusion v1.5 components
         if cfg.model != "LATINO-1.5":
-            model_id = "/lustre/fswork/projects/rech/ynx/uxl64xr/models/sd15"
-            pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
+            model_id = _resolve_sd15_model_path(
+                os.environ.get("SD15_MODEL_PATH", "/lustre/fswork/projects/rech/ynx/uxl64xr/models/sd15")
+            )
+            print(f"Using SD 1.5 model path: {model_id}")
+            if os.path.isfile(model_id):
+                pipe = StableDiffusionPipeline.from_single_file(model_id, torch_dtype=torch.float16).to(device)
+            else:
+                pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
             pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
             if cfg.model == "TREG":
                 num_inference_steps = 200
@@ -199,15 +217,25 @@ def main(cfg: DictConfig) -> None:
                 num_inference_steps = 999
                 guidance_scale = 1  # CFG scale
         else:
-            model_id = "/lustre/fswork/projects/rech/ynx/uxl64xr/models/sd15"
-            adapter_id = "/lustre/fswork/projects/rech/ynx/uxl64xr/models/lcm-lora-sdv1-5"
+            model_id = _resolve_sd15_model_path(
+                os.environ.get("SD15_MODEL_PATH", "/lustre/fswork/projects/rech/ynx/uxl64xr/models/sd15")
+            )
+            adapter_id = os.environ.get("LCM_LORA_PATH", "/lustre/fswork/projects/rech/ynx/uxl64xr/models/lcm-lora-sdv1-5")
+            print(f"Using SD 1.5 model path: {model_id}")
+            print(f"Using LCM LoRA path: {adapter_id}")
 
-            pipe = AutoPipelineForText2Image.from_pretrained(model_id, torch_dtype=torch.float16, variant="fp16")
+            if os.path.isfile(model_id):
+                pipe = StableDiffusionPipeline.from_single_file(model_id, torch_dtype=torch.float16)
+            else:
+                pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
             pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
             pipe.to("cuda")
 
             # load and fuse lcm lora
-            pipe.load_lora_weights(adapter_id)
+            if os.path.isfile(adapter_id):
+                pipe.load_lora_weights(os.path.dirname(adapter_id), weight_name=os.path.basename(adapter_id))
+            else:
+                pipe.load_lora_weights(adapter_id)
             pipe.fuse_lora()
 
             num_inference_steps = 8
@@ -304,9 +332,24 @@ def main(cfg: DictConfig) -> None:
 
     x_clean = (x_clean - x_clean.min())/(x_clean.max() - x_clean.min())
 
-    # Build forward and transpose operators
-    forward_model, transpose_operator = get_forward_model(cfg, x_clean, device)
+    # # Build forward and transpose operators
+    # forward_model, transpose_operator = get_forward_model(cfg, x_clean, device)
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # forward_model = forward_model.to(device)
+    # y = forward_model(x_clean)
+    # y_norm = y * 2 - 1
+    # sigma_y_norm = cfg.problem.sigma_y * 2
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Make sure x_clean is already on the correct device
+    x_clean = x_clean.to(device)
+    forward_model, transpose_operator = get_forward_model(cfg, x_clean, device) #    # Build forward model directly on the correct device
+    forward_model = forward_model.to(device)
+    if hasattr(forward_model, "mask"):
+        forward_model.mask = forward_model.mask.to(device)
+    
+    # Now safe
     y = forward_model(x_clean)
     y_norm = y * 2 - 1
     sigma_y_norm = cfg.problem.sigma_y * 2

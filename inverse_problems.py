@@ -9,16 +9,52 @@ def get_forward_model(cfg, x_clean, device):
     if cfg.problem.type == 'inpainting_squared_mask':
         B, C, H, W = x_clean.shape
         mask = torch.ones((1, H, W), device=x_clean.device)
-        size = cfg.problem.mask_size
-        # Define mask region
-        mask[:, H//2 - size//5 - 35:H//2 + size//5 - 35,
-             W//2 - 4*size//5 - 2:W//2 + 4*size//5 + 2] = 0
+        size = int(cfg.problem.mask_size)
+        ref_res = int(cfg.problem.get("mask_reference_resolution", 1024))
+
+        # The original mask formula was authored for 1024px images.
+        # Scale it to the current image size so 512px runs use the same relative occlusion.
+        scale_y = H / ref_res
+        scale_x = W / ref_res
+        size_y = max(1, round(size * scale_y))
+        size_x = max(1, round(size * scale_x))
+        offset_y = round(35 * scale_y)
+        offset_x = round(2 * scale_x)
+
+        top = max(0, min(H, H // 2 - size_y // 5 - offset_y))
+        bottom = max(0, min(H, H // 2 + size_y // 5 - offset_y))
+        left = max(0, min(W, W // 2 - 4 * size_x // 5 - offset_x))
+        right = max(0, min(W, W // 2 + 4 * size_x // 5 + offset_x))
+
+        if top >= bottom or left >= right:
+            raise ValueError(
+                f"Invalid inpainting mask bounds for image size {(H, W)} "
+                f"with mask_size={size} and mask_reference_resolution={ref_res}."
+            )
+
+        mask[:, top:bottom, left:right] = 0
+        # forward_model = dinv.physics.Inpainting(
+        #     tensor_size=x_clean.shape,
+        #     mask=mask,
+        #     noise_model=noise_model,
+        # ).to(device)
+        
+        # # 🔥 deepinv bug fix: mask is NOT moved by .to()
+        # forward_model.mask = forward_model.mask.to(device)
+        # transpose_operator = forward_model.A_adjoint
+        # forward_model = forward_model.to(device)
+
         forward_model = dinv.physics.Inpainting(
             tensor_size=x_clean.shape,
             mask=mask,
             noise_model=noise_model,
         ).to(device)
-        transpose_operator = forward_model.A_adjoint
+        
+        # 🔥 HARD FIX: ensure internal buffers are moved
+        forward_model.to(device)
+        
+        # 🔥 CRITICAL: re-assign mask AFTER .to()
+        forward_model.mask = forward_model.mask.to(device)
 
     elif cfg.problem.type == 'deblurring_gaussian':
         ksize = cfg.problem.sigma_kernel

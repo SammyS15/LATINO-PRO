@@ -72,9 +72,27 @@ def noise_pred_cond_y(
                 delta = 1
         print(f"delta at step {t}: ", "%.2f" % delta)
         with torch.no_grad():
-            gamma = delta*var_x_zt/(sigma_y**2)
-            gamma = gamma.to(device=latents.device)
-            prox_x = forward_model.prox_l2(x.float(), y=y_guidance, gamma=gamma)
+        
+            sigma_y = torch.as_tensor(sigma_y, device=x.device, dtype=x.dtype)
+            delta   = torch.as_tensor(delta, device=x.device, dtype=x.dtype)
+            
+            gamma = delta * var_x_zt / (sigma_y ** 2)
+            gamma = torch.as_tensor(gamma, device=x.device)
+            
+            x_in = x.to(x.device).float()
+            y_in = y_guidance.to(x.device)
+        
+            print("x:", x_in.device)
+            print("y:", y_in.device)
+            print("mask:", forward_model.mask.device)
+            print("gamma:", gamma.device)
+        
+            # prox_x = forward_model.prox_l2(x_in, y=y_in, gamma=gamma)
+            prox_x = forward_model.prox_l2(
+                x.float().detach().clone(),
+                y=y_guidance,
+                gamma=gamma
+            )
 
             # encode
             qz= pipe.vae.encode(prox_x.clip(-1,1).half())
@@ -163,7 +181,12 @@ def noise_pred_cond_y_15(
             delta = 1
     print(f"delta at step {t}: ", "%.2f" % delta)
     with torch.no_grad():
-        prox_x = forward_model.prox_l2(x.float().detach().clone(), y=y_guidance, gamma=delta*var_x_zt/(sigma_y**2))
+        # prox_x = forward_model.prox_l2(x.float().detach().clone(), y=y_guidance, gamma=delta*var_x_zt/(sigma_y**2))
+        prox_x = forward_model.prox_l2(
+            x.float().detach().clone(),
+            y=y_guidance,
+            gamma=delta*var_x_zt/(sigma_y**2)
+        )
     # encode
     with torch.no_grad():
         qz= pipe.vae.encode(prox_x.clip(-1,1).half())
@@ -336,7 +359,12 @@ def noise_pred_cond_y_DPS_P2L(
     # modify hyperparm according to Table 6 in the paper: # https://arxiv.org/pdf/2310.01110
     if t%8 == 1:
         with torch.no_grad(): 
-            prox_x = forward_model.prox_l2(x.float(), y=y_guidance, gamma=1)
+            #prox_x = forward_model.prox_l2(x.float(), y=y_guidance, gamma=1)
+            prox_x = forward_model.prox_l2(
+                x.float().detach().clone(),
+                y=y_guidance,
+                gamma=1
+            )
 
             # encode
             qz= pipe.vae.encode(prox_x.clip(-1,1).half())
@@ -473,7 +501,12 @@ def noise_pred_cond_y_DPS_1024_P2L(
     # modify hyperparm according to Table 6 in the paper: # https://arxiv.org/pdf/2310.01110
     if t%8 == 1:
         with torch.no_grad(): 
-            prox_x = forward_model.prox_l2(x.float(), y=y_guidance, gamma=1)
+            # prox_x = forward_model.prox_l2(x.float(), y=y_guidance, gamma=1)
+            prox_x = forward_model.prox_l2(
+                x.float().detach().clone(),
+                y=y_guidance,
+                gamma=1
+            )
 
             # encode
             qz= pipe.vae.encode(prox_x.clip(-1,1))
@@ -498,7 +531,12 @@ def noise_pred_cond_y_TReg(
 ):
     with torch.no_grad():
         with torch.no_grad():
-            prox_x = forward_model.prox_l2(x.float().detach().clone(), y=y_guidance, gamma=1e4) # gamma=1/lambda used in TReg
+            # prox_x = forward_model.prox_l2(x.float().detach().clone(), y=y_guidance, gamma=1e4) # gamma=1/lambda used in TReg
+            prox_x = forward_model.prox_l2(
+                x.float().detach().clone(),
+                y=y_guidance,
+                gamma=1e-4
+            )
         # encode
         with torch.no_grad():
             qz= pipe.vae.encode(prox_x.clip(-1,1).half())
@@ -616,7 +654,12 @@ def noise_pred_cond_y_PRO(
     print(f"delta at step {t}: ", "%.2f" % delta)
 
     with torch.no_grad():
-        prox_x = forward_model.prox_l2(x.float(), y=y_guidance, gamma=delta*var_x_zt/(sigma_y**2))
+        #prox_x = forward_model.prox_l2(x.float(), y=y_guidance, gamma=delta*var_x_zt/(sigma_y**2))
+        prox_x = forward_model.prox_l2(
+            x.float().detach().clone(),
+            y=y_guidance,
+            gamma=delta*var_x_zt/(sigma_y**2)
+        )
 
         # encode
         qz= pipe.vae.encode(prox_x.clip(-1,1).half())

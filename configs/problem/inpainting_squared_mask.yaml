@@ -1,3 +1,4 @@
 type: inpainting_squared_mask
 mask_size: 512
+mask_reference_resolution: 1024
 sigma_y: 0.01

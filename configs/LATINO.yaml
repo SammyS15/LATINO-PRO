@@ -3,6 +3,7 @@ log_subfolder: test
 defaults:
   - problem: sr_x16
   - image: face
+  - _self_
 
 seed: 42
 model: LATINO  #alternatives: LATINO-1.5, LDPS, LDPS1024, PSLD, PSLD1024, LDPS-P2L, LDPS1024-P2L, TREG, TREG1024
