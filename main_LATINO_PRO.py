@@ -53,15 +53,17 @@ def main(cfg: DictConfig) -> None:
     ssim_loss = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=1).to(device)
 
     # load stable diffusion
-    base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+    # base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+    base_model_id = "/lustre/fswork/projects/rech/ynx/uxl64xr/.cache/huggingface/models/sdxl"
+
     repo_name = "tianweiy/DMD2"
     ckpt_name = "dmd2_sdxl_4step_unet_fp16.bin"
 
     # Load model.
     unet_config = UNet2DConditionModel.load_config(base_model_id, subfolder="unet")
     unet = UNet2DConditionModel.from_config(unet_config).to(device, torch.float16)
-    unet.load_state_dict(torch.load(hf_hub_download(repo_name, ckpt_name), map_location=device, weights_only=True))
-    vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
+    unet.load_state_dict(torch.load("/lustre/fswork/projects/rech/ynx/uxl64xr/.cache/huggingface/hub/models--tianweiy--DMD2/snapshots/be22767697a1f3ca656b73c776e15fa335c86c6c/dmd2_sdxl_4step_unet_fp16.bin", map_location=device, weights_only=True))
+    vae = AutoencoderKL.from_pretrained("/lustre/fswork/projects/rech/ynx/uxl64xr/.cache/huggingface/hub/models--madebyollin--sdxl-vae-fp16-fix/snapshots/207b116dae70ace3637169f1ddd2434b91b3a8cd", torch_dtype=torch.float16)
     pipe = DiffusionPipeline.from_pretrained(base_model_id, unet=unet, vae=vae, torch_dtype=torch.float16, variant="fp16", guidance_scale=0).to(device)
     pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
     prompt = cfg.image.prompt    #Ensure that the prompt starts with "a photo of"!
@@ -159,6 +161,7 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.save(config=cfg, f=f)
 
     # Apply the initialization strategy
+    mu_z = None  # populated for y_noise init; kept for posterior sampling loop
     if cfg.problem.type != 'inpainting_squared_mask':
         mask = None
     else:
@@ -434,24 +437,106 @@ def main(cfg: DictConfig) -> None:
         # Decode latents to image
         decoded_image = pipe.vae.decode(latents / pipe.vae.config.scaling_factor).sample
 
-    restored_x = (decoded_image / 2 + 0.5).clamp(0, 1)  # Normalize latents to image space
+    restored_x = (decoded_image / 2 + 0.5).clamp(0, 1)  # SAPG single-realization output
 
     save_image(restored_x, os.path.join(xp_log_dir, "restored.png"))
     save_image(((y_norm+1)/2).clamp(0, 1).detach().cpu(), os.path.join(xp_log_dir, "degraded.png"))
     save_image(x_clean.detach().cpu(), os.path.join(xp_log_dir, "clean.png"))
 
-    psnr = psnr_loss(restored_x, x_clean).item()
-    ssim = ssim_loss(restored_x, x_clean).item()
-    lpips = lpips_loss(restored_x * 2 - 1, x_clean * 2 -1).item()
+    # ------------------------------------------------------------------
+    # Posterior sampling: run num_samples independent LCM passes using
+    # the final optimised text_embeddings from SAPG.
+    # ------------------------------------------------------------------
+    num_samples = cfg.get('num_samples', 1)
+    all_samples = []
+    samples_dir = os.path.join(xp_log_dir, 'samples')
+    os.makedirs(samples_dir, exist_ok=True)
+
+    sample_start = time.time()
+    for sample_idx in range(num_samples):
+        print(f"\n--- Posterior sample {sample_idx + 1}/{num_samples} ---")
+        sample_seed = seed + sample_idx
+        generator_s = torch.Generator(device=device).manual_seed(sample_seed)
+
+        if cfg.init_strategy == 'y_noise' and mu_z is not None:
+            noise_s = torch.randn(mu_z.shape, generator=generator_s, device=device, dtype=mu_z.dtype)
+            latents_s = pipe.scheduler.add_noise(mu_z, noise=noise_s, timesteps=torch.tensor([999]))
+        else:
+            latents_s = pipe.prepare_latents(
+                batch_size=1,
+                num_channels_latents=pipe.unet.config.in_channels,
+                height=image_height,
+                width=image_width,
+                dtype=torch.float16,
+                device=device,
+                generator=generator_s,
+            )
+
+        pipe.scheduler.set_timesteps(8, device=device)
+        pipe.scheduler.timesteps = torch.tensor(
+            [999, 874, 749, 624, 499, 374, 249, 124], device=device, dtype=torch.long
+        )
+
+        for i, timestep in enumerate(pipe.scheduler.timesteps):
+            with torch.no_grad():
+                noise_uncond_s = pipe.unet(
+                    latents_s, timestep,
+                    encoder_hidden_states=text_embeddings,
+                    added_cond_kwargs=added_cond_kwargs,
+                ).sample
+                _, noise_pred_s = noise_pred_cond_y_PRO(
+                    latents=latents_s, t=timestep, pipe=pipe, cfg=cfg,
+                    logdir=xp_log_dir, y_guidance=y_norm, forward_model=forward_model,
+                    noise_pred=noise_uncond_s, sigma_y=sigma_y_norm,
+                    SAPG_j=cfg.num_SAPG_steps - 1, n_steps=8,
+                )
+                latents_s = pipe.scheduler.step(noise_pred_s, timestep, latents_s).prev_sample
+
+        with torch.no_grad():
+            decoded_s = pipe.vae.decode(latents_s / pipe.vae.config.scaling_factor).sample
+        sample_x = (decoded_s / 2 + 0.5).clamp(0, 1)
+        all_samples.append(sample_x.detach().cpu())
+        save_image(sample_x, os.path.join(samples_dir, f'sample_{sample_idx:03d}.png'))
+        print(f"Saved sample_{sample_idx:03d}.png")
+
+    print(f"\nSampling time: {time.time() - sample_start:.2f}s")
+
+    # Stack samples [N, C, H, W]
+    all_samples_t = torch.cat(all_samples, dim=0)
+
+    # Posterior mean and pixelwise std
+    posterior_mean = all_samples_t.mean(0, keepdim=True)
+    posterior_std  = all_samples_t.std(0, keepdim=True)
+    save_image(posterior_mean, os.path.join(xp_log_dir, 'posterior_mean.png'))
+    save_image(posterior_std.clamp(0, 1), os.path.join(xp_log_dir, 'posterior_std.png'))
+    save_image((posterior_std * 5).clamp(0, 1), os.path.join(xp_log_dir, 'posterior_std_5x.png'))
+
+    # Residuals
+    x_clean_cpu = x_clean.detach().cpu()
+    y_obs = y.clamp(0, 1).detach().cpu()
+    with torch.no_grad():
+        y_from_sample0 = forward_model.A(all_samples_t[0:1].to(device)).clamp(0, 1).detach().cpu()
+        y_from_mean    = forward_model.A(posterior_mean.to(device)).clamp(0, 1).detach().cpu()
+
+    save_image((x_clean_cpu - all_samples_t[0:1] + 1) / 2, os.path.join(xp_log_dir, 'residual_x_sample0.png'))
+    save_image((y_obs - y_from_sample0 + 1) / 2,           os.path.join(xp_log_dir, 'residual_y_sample0.png'))
+    save_image((x_clean_cpu - posterior_mean + 1) / 2,     os.path.join(xp_log_dir, 'residual_x_mean.png'))
+    save_image((y_obs - y_from_mean + 1) / 2,              os.path.join(xp_log_dir, 'residual_y_mean.png'))
+
+    # Final metrics computed on posterior mean
+    posterior_mean_dev = posterior_mean.to(device)
+    psnr  = psnr_loss(posterior_mean_dev, x_clean).item()
+    ssim  = ssim_loss(posterior_mean_dev, x_clean).item()
+    lpips = lpips_loss(posterior_mean_dev * 2 - 1, x_clean * 2 - 1).item()
     metrics = {
         'PSNR' : psnr,
-        'SSIM' : ssim, 
-        'LPIPS': lpips
+        'SSIM' : ssim,
+        'LPIPS': lpips,
     }
 
     if type(forward_model) == dinv.physics.Downsampling:
-        restored_x_lr = forward_model.A(restored_x.float())
-        lr_psnr = psnr_loss(((y_norm+1)/2).clamp(0, 1), restored_x_lr).item()
+        restored_x_lr = forward_model.A(posterior_mean_dev.float())
+        lr_psnr = psnr_loss(y_obs.to(device), restored_x_lr).item()
         metrics['OBS-PSNR'] = lr_psnr
 
     metric_string = ""

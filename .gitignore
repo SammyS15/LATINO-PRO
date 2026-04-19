@@ -1,0 +1,22 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs and outputs
+logs/
+outputs/
+results_LATINO/
+results_LATINO_PRO/
+
+# Samples (large files, cluster-specific)
+samples/
+
+# SLURM
+*.sbatch

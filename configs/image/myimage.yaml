@@ -1,0 +1,2 @@
+path: ./samples/myimage.png
+prompt: "a photo of the eiffel tower"  # describe what's in the image
