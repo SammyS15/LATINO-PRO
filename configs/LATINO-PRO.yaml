@@ -7,3 +7,4 @@ defaults:
 seed: 42
 num_SAPG_steps: 15  # For LATINO-PRO
 init_strategy: "y_noise"
+num_samples: 100

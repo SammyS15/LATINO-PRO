@@ -7,3 +7,4 @@ defaults:
 seed: 42
 model: LATINO  #alternatives: LATINO-1.5, LDPS, LDPS1024, PSLD, PSLD1024, LDPS-P2L, LDPS1024-P2L, TREG, TREG1024
 init_strategy: "y_noise"
+num_samples: 100  # number of posterior samples to draw
