@@ -181,11 +181,11 @@ def noise_pred_cond_y_15(
             delta = 1
     print(f"delta at step {t}: ", "%.2f" % delta)
     with torch.no_grad():
-        # prox_x = forward_model.prox_l2(x.float().detach().clone(), y=y_guidance, gamma=delta*var_x_zt/(sigma_y**2))
+        gamma = float(delta * var_x_zt / (sigma_y**2))
         prox_x = forward_model.prox_l2(
             x.float().detach().clone(),
             y=y_guidance,
-            gamma=delta*var_x_zt/(sigma_y**2)
+            gamma=gamma
         )
     # encode
     with torch.no_grad():

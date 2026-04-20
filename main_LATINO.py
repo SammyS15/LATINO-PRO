@@ -860,7 +860,7 @@ def main(cfg: DictConfig) -> None:
 
                 for k, v in log_image_dict.items():
                     save_image(torch.clamp(v * 0.5 + 0.5, 0, 1), os.path.join(logdir_iter, f'{timestep:3d}_{k}.png'))
-
+        
             # step the scheduler
             if cfg.model not in {"TREG", "TREG1024"}:
                 latents = pipe.scheduler.step(noise_pred, timestep, latents).prev_sample
@@ -893,6 +893,8 @@ def main(cfg: DictConfig) -> None:
         restored_x = (decoded_image / 2 + 0.5).clamp(0, 1)
         all_samples.append(restored_x.detach().cpu())
         save_image(restored_x, os.path.join(samples_dir, f"sample_{sample_idx:03d}.png"))
+        torch.save(restored_x[0].detach().cpu(), os.path.join(samples_dir, f"sample_{sample_idx:03d}.pt"))
+
 
         # Per-sample metrics.
         s_psnr  = psnr_loss(restored_x, x_clean).item()
@@ -917,6 +919,12 @@ def main(cfg: DictConfig) -> None:
     save_image(restored_x, os.path.join(xp_log_dir, "restored.png"))
     save_image(((y_norm + 1) / 2).clamp(0, 1).detach().cpu(), os.path.join(xp_log_dir, "degraded.png"))
     save_image(x_clean.detach().cpu(), os.path.join(xp_log_dir, "clean.png"))
+    shared_dir = os.path.join(xp_log_dir, "shared")
+    os.makedirs(shared_dir, exist_ok=True)
+    torch.save(x_clean[0].detach().cpu(), os.path.join(shared_dir, "gt.pt"))
+    torch.save(y.clamp(0, 1)[0].detach().cpu(), os.path.join(shared_dir, "yn.pt"))
+    if mask is not None:
+        torch.save(mask.detach().cpu(), os.path.join(shared_dir, "mask.pt"))
 
     # (b) Posterior mean and pixelwise std across all samples.
     posterior_mean = all_samples_t.mean(0, keepdim=True)   # [1, C, H, W]
