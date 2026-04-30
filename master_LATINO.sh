@@ -21,7 +21,7 @@ set -euo pipefail
 
 # ── Parameters (override via env vars) ──────────────────────────────────────
 # IMAGE_DIR="${IMAGE_DIR:-/lustre/fsn1/projects/rech/ynx/uxl64xr/latent_model_test_images}"
-IMAGE_DIR="${IMAGE_DIR:-/lustre/fsn1/projects/rech/ynx/uxl64xr/Images_Posterior_Method_Test_512}"
+IMAGE_DIR="${IMAGE_DIR:-/lustre/fsn1/projects/rech/ynx/uxl64xr/SA_1B_Images}"
 PROBLEM="${PROBLEM:-inpainting_squared_mask}"
 IMAGE_PROMPT="${IMAGE_PROMPT:-}"
 INIT_STRATEGY="${INIT_STRATEGY:-noise}"
